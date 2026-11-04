@@ -1,0 +1,25 @@
+打包命令（在源码目录执行）：
+
+python -m pip install pyinstaller pystray pillow hidapi
+python gen_icon.py icon.ico
+
+python -m PyInstaller --onefile --noconsole --name BatteryTray ^
+  --icon "<源码目录绝对路径>\icon.ico" ^
+  --manifest "<源码目录绝对路径>\app.manifest" ^
+  --collect-all hid --distpath .\dist --workpath .\build --specpath .\build ^
+  battery_tray.py
+
+注意：
+  · --icon / --manifest 必须写绝对路径。PyInstaller 会按 --specpath 的相对路径去解析，
+    写相对路径时打包会"成功"但 dist 里生成一个几十 KB 的残缺 exe。
+  · app.manifest 只做两件事：声明 PerMonitorV2 DPI 感知（高分屏下面板不糊）、
+    引用 comctl32 v6。没有它也能跑，只是缩放不是 100% 的机器上界面会发虚。
+
+然后把 dist\BatteryTray.exe 改名为 设备电量.exe
+
+文件职责：
+  battery_tray.py   托盘图标 + 右键菜单 + 定时采样线程
+  popup.py          左键弹的竖列面板（分层窗口 + Pillow 出图，纯 ctypes）
+  icons.py          托盘图标绘制、电量分级配色、电池图形、菜单里的方块电池
+  hw_readers.py     蓝牙 / 罗技 HID++ / AULA 2.4G 私有协议 电量读取
+  state_store.py    状态持久化 + 掉电速率估算
