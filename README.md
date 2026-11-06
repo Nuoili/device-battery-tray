@@ -22,7 +22,7 @@ Windows 自带的任务栏电池只显示「本机」电量。蓝牙键鼠、耳
 
 ## 安装与使用
 
-1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBatteryTray-v1.0.0.exe`（就是「设备电量.exe」，仅改了文件名），双击启动
+1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBatteryTray-v1.0.1.exe`（就是「设备电量.exe」，仅改了文件名），双击启动。同一页还有 `DeviceBatteryTray-Uninstaller-v1.0.1.bat`，留着以后卸载用
 2. 图标默认在托盘 `^` 溢出区 —— 点开 `^`，按住图标拖到常显区松手即可固定
 3. **左键单击** = 弹面板（再点一次收起，点面板外面也会收）；**右键** = 设置菜单
 
