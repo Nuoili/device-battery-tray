@@ -195,6 +195,11 @@ SOFT_GRAY = MUTED
 # 边缘太淡会跟绿色/黄色糊在一起。文字统一成 176 后，这里保持不变。
 BAT_FRAME = (126, 138, 158, 255)
 
+# 双模设备（同一把键盘既有 2.4G 又有蓝牙）合并成一行后，用一个小标签写清
+# **这行数据来自哪条链路**——不然用户没法判断面板显示的是不是当前在用的那个连接方式。
+CHANNEL_LABEL = {'aula': '2.4G', 'logitech': '2.4G', 'bluetooth': '蓝牙'}
+TAG_GRAY = (146, 156, 172, 235)   # 比正文再淡一档，不抢设备名的注意力
+
 # 磨砂背板参数
 # 说的是"透明度"：透明度 60% → 背板不透明度 40%（alpha≈102）。
 # 想要更透就调小 BACKDROP_OPACITY，更实就调大（0.8 = 透明度 20%）。
@@ -289,6 +294,8 @@ def render_panel(rows, scale=1.0, width_dip=340, updated_text='', footer='',
 
     f_name = icons.cn_font(int(round(13.0 * s)), bold=False)
     f_pct = f_name                                  # 百分比跟设备名同一套字，视觉上齐平
+    f_tag = icons.cn_font(int(round(10.0 * s)), bold=False)
+    tag_gap = 7 * s                                 # 设备名与链路标签之间的空隙
 
     if not rows:
         tl.text((pad, head_h + row_h * 0.5), '未发现可读取电量的设备',
@@ -323,8 +330,14 @@ def render_panel(rows, scale=1.0, width_dip=340, updated_text='', footer='',
 
         if online:
             pct_text = '—' if lv is None else ('≈' if r.get('estimated') else '') + f'{int(round(lv))}%'
-            shown, _ = _fit(d, name, f_name, max_name_w)
+            # 双模设备（2.4G + 蓝牙）只显示当前在用的那条链路，标签写清是哪条
+            ctag = CHANNEL_LABEL.get(r.get('channel') or '', '')
+            tag_w = (d.textlength(ctag, font=f_tag) + tag_gap) if ctag else 0
+            shown, nw = _fit(d, name, f_name, max_name_w - tag_w)
             tl.text((name_x, cy), shown, font=f_name, fill=SOFT_GRAY, anchor='lm')
+            if ctag:
+                tl.text((name_x + nw + tag_gap, cy), ctag, font=f_tag,
+                        fill=TAG_GRAY, anchor='lm', grow=0)
 
             bx = bat_right - bat_w
             icons.draw_battery_bar(d, bx, cy - bat_h / 2.0, bat_w, bat_h, lv, s,

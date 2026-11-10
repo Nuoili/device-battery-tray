@@ -31,7 +31,7 @@ import popup
 import state_store
 
 APP_TITLE = '设备电量'
-APP_VERSION = '1.0.3'
+APP_VERSION = '1.0.4'
 APP_REG_NAME = 'DeviceBatteryTray'
 MUTEX_NAME = 'DeviceBatteryTray_SingleInstance'
 # 第二次双击时用来叫醒已经在跑的那个实例：它 wait 这个命名事件，收到就把面板弹出来
@@ -174,13 +174,37 @@ def _charging_state(dev, now=None):
 # 2.4G 能顺手拿到充电状态、响应也快，蓝牙只能读系统缓存属性，所以同在线时优先 2.4G。
 _CHANNEL_RANK = {'aula': 0, 'logitech': 1, 'bluetooth': 2}
 
+# 「这条链路现在还在应答」的有效期（秒）。超过就当它当前没在用，把显示让给另一条。
+#   · aula：probe 每 3 秒向接收器要一次电量（实测 26~43ms），留 2 次失败余量，
+#     所以键盘拨到蓝牙后最多 8 秒，面板这行就会跟着换成蓝牙那一路；
+#   · logitech：只在整轮扫描时读（默认 60 分钟一轮），窗口跟着放宽；
+#   · bluetooth：属性 3 秒一读，留 3 次失败余量。
+# 为什么要这么判：蓝牙的 `DEVPKEY_Bluetooth_Battery` 是**缓存**的，配对设备即使
+# 早就切回 2.4G，属性里还留着上次的电量，光看「在线」永远是 True。只有
+# 「接收器此刻还回不回数据」才能说明键盘正走哪条链路。
+_LINK_FRESH_SECONDS = {'aula': 8, 'logitech': 4000, 'bluetooth': 10}
+
+
+def _link_fresh(row):
+    """这条链路最近还在真实应答吗（而不是只剩一份缓存的旧读数）。"""
+    window = _LINK_FRESH_SECONDS.get(row.get('channel') or '')
+    if window is None:
+        return False
+    return (row.get('age') or 0) <= window
+
 
 def _merge_same_device(rows):
     """把「AULA-F87」和「AULA-F87 5.0」这种同一台设备的两条链路合成一行。
 
-    名字只留一个（去掉蓝牙版本尾巴），电量取更有说服力的那条：
-    在线的优先；都掉线就取最近连过的那条；同链路状态再比通道。
-    这样面板上不会出现「一台键盘两行、一行 100% 一行未连接」。
+    双模键鼠（如 AULA F87）会同时出现在两条通道上：2.4G 接收器一路、蓝牙一路。
+    面板只该显示**当前正在用的那条链路**，规则按优先级：
+
+      1. 在线的优先于离线的；
+      2. 都算在线时，取「最近还在应答」的那条 —— 键盘拨到蓝牙后，2.4G 接收器
+         就再也回不出数据，这一路随即让位给蓝牙；拨回 2.4G 则反过来；
+      3. 两条都在应答，才按通道可信度取 2.4G（它能顺手给出充电状态）。
+
+    这样面板上既不会「一台键盘两行」，也不会显示一条早就没在用的链路的旧电量。
     """
     merged = {}
     order = []
@@ -203,6 +227,10 @@ def _merge_same_device(rows):
 def _better_row(a, b):
     if a['online'] != b['online']:
         return a if a['online'] else b
+    fa = _link_fresh(a)
+    fb = _link_fresh(b)
+    if fa != fb:
+        return a if fa else b
     ra = _CHANNEL_RANK.get(a.get('channel'), 9)
     rb = _CHANNEL_RANK.get(b.get('channel'), 9)
     if ra != rb:
@@ -273,7 +301,7 @@ class BatteryTray:
             self.refresh_display(force=True)
 
     def probe(self):
-        """轻量探测（3 秒一次）：蓝牙快照 + HID 接口集合。
+        """轻量探测（3 秒一次）：蓝牙快照 + AULA 2.4G 应答 + HID 接口集合。
 
         **两条结果分开返回** `(levels_changed, roster_changed)`：
           · roster_changed —— 设备增删（新接入 / 掉线 / 重新连上），面板要重建列表
@@ -281,6 +309,7 @@ class BatteryTray:
 
         和整轮扫描的区别：
           · 蓝牙只读系统缓存属性 + 经典链路状态，不往设备发请求，3 秒一次不打扰休眠
+          · AULA 2.4G 只向接收器要一次电量（实测 26~43ms），不唤醒键盘
           · HID 只枚举接口路径（微秒级），不读数、不跟罗技握手
         """
         levels = False
@@ -318,6 +347,24 @@ class BatteryTray:
                 for key in res['level']:
                     dev = devices.get(key) or {}
                     log.debug('电量变化：%s %s%%', dev.get('name'), dev.get('last_level'))
+
+        # ---- AULA 2.4G：接收器直接应答（实测 26~43ms），和蓝牙同一个节奏读 ----
+        # 目的不只是刷电量，更重要是判断**这条链路此刻还在不在用**：
+        # 双模键盘拨到蓝牙后，接收器就再也回不出数据，这一路随即让位给蓝牙。
+        # 读不到时**不判离线** —— 键盘休眠时接收器同样不回话，那不代表它不在了。
+        try:
+            aula_items = hw_readers.read_aula_batteries()
+        except Exception:
+            aula_items = None
+            log.debug('AULA 探测失败', exc_info=True)
+        if aula_items:
+            with self.lock:
+                res = state_store.update_levels(self.state, aula_items,
+                                               time.time())
+                if res['new'] or res['revived'] or res['level']:
+                    roster = roster or bool(res['new'] or res['revived'])
+                    levels = levels or bool(res['level'])
+                    state_store.save_state(self.state)
 
         # ---- HID：接口集合变了就说明插拔过接收器，立刻做一次整轮扫描 ----
         try:
