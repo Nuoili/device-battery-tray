@@ -109,7 +109,17 @@ def list_present_instance_ids():
 
 
 def read_bluetooth_batteries():
-    """返回所有能在系统属性里读到电量的设备（蓝牙为主）。"""
+    """返回所有能在系统属性里读到电量的设备（蓝牙为主）。
+
+    「在线」的判定改了（2026-11-11 实测结论）：
+    `DEVPKEY_Device_IsConnected` 对 BLE 耳机 / BLE 键鼠全部返回 0 —— 它们的 LE 链路
+    是按需建立的，电量读一次就断，链路状态和「人在不在用」不是一回事。用它判在线会
+    把正在听歌的耳机判成离线，进而被隐藏。
+
+    实测另一个信号更可靠：**断开（关机 / 出配对）后 `DEVPKEY_Bluetooth_Battery` 会消失**，
+    只有连着的设备才带着电量出现在属性里（Keychron、Joy-Con、HECATE 断开时都取不到电量）。
+    所以这里「能读到电量」就直接算在线；掉线由调用方按「本轮快照里没有它」判定。
+    """
     out = []
     for inst in list_present_instance_ids():
         devinst = wt.ULONG()
@@ -130,9 +140,9 @@ def read_bluetooth_batteries():
         if not name:
             name = inst.split('\\')[1] if '\\' in inst else inst
         mac = bluetooth_mac(inst)
-        # 连接状态：拿不到这个属性就当它是连着的，宁可显示旧电量也别误判离线
+        # 链路状态只作为参考值保留，不再用来判在线（见 docstring）
         _, conn_raw = _devnode_prop(devinst, PKEY_IS_CONNECTED, 16)
-        connected = True if not conn_raw else bool(int.from_bytes(conn_raw[:4], 'little'))
+        connected = None if not conn_raw else bool(int.from_bytes(conn_raw[:4], 'little'))
         out.append({
             'key': ('bt:' + mac) if mac else ('bt:' + inst),
             'name': clean_name(name),
@@ -141,7 +151,8 @@ def read_bluetooth_batteries():
             'instance': inst,
             'status': None,
             'charging': None,      # 系统属性只给电量，给不了充电状态
-            'online': connected,   # 断开的蓝牙设备只剩缓存电量，不能当实时值
+            'online': True,        # 能读到电量 = 此刻连着（含缓存但有值的情况）
+            'link_connected': connected,
             'ts': time.time(),
         })
     return out

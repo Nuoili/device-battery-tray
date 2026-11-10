@@ -443,6 +443,60 @@ def _with_shadow(panel, mask, scale=1.0):
 _wndproc_ref = None
 
 
+def tray_icon_rect(hwnd, uid=0):
+    """取托盘里这个通知图标的精确矩形（屏幕坐标）。拿不到返回 None。
+
+    pystray 注册图标时用的是 uID = 0（不是 id(icon)，实测 id 会 E_FAIL），
+    所以这里固定传 0。拿不到就让调用方退回按任务栏对齐。
+    """
+    try:
+        shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD),
+                        ('Data3', wintypes.WORD), ('Data4', ctypes.c_ubyte * 8)]
+
+        class _NID(ctypes.Structure):
+            _fields_ = [('cbSize', wintypes.DWORD), ('hWnd', wintypes.HWND),
+                        ('uID', wintypes.UINT), ('guidItem', _GUID)]
+
+        shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(_NID),
+                                                    ctypes.POINTER(wintypes.RECT)]
+        shell32.Shell_NotifyIconGetRect.restype = ctypes.c_long
+        nid = _NID()
+        nid.cbSize = ctypes.sizeof(_NID)
+        nid.hWnd = hwnd
+        nid.uID = uid
+        rc = wintypes.RECT()
+        hr = shell32.Shell_NotifyIconGetRect(ctypes.byref(nid), ctypes.byref(rc))
+        if hr != 0 or rc.right <= rc.left or rc.bottom <= rc.top:
+            return None
+        return (rc.left, rc.top, rc.right, rc.bottom)
+    except Exception:
+        return None
+
+
+def _monitor_work_area(x, y):
+    """给图标所在那块屏幕的工作区（多显示器时按图标位置选屏）。"""
+    try:
+        MONITOR_DEFAULTTONEAREST = 2
+
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [('cbSize', wintypes.DWORD), ('rcMonitor', wintypes.RECT),
+                        ('rcWork', wintypes.RECT), ('dwFlags', wintypes.DWORD)]
+
+        pt = wintypes.POINT(x, y)
+        hmon = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if hmon and user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            r = mi.rcWork
+            return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        pass
+    return None
+
+
 class DevicePanel:
     """面板单例。所有公开方法都可以从任意线程调用。"""
 
@@ -465,6 +519,9 @@ class DevicePanel:
         self._last_key = None
         self._bg = None
         self._bg_key = None
+        # 由 battery_tray 注入：返回托盘图标的屏幕矩形 (l, t, r, b)，拿不到返回 None。
+        # 有它就贴着图标摆，没有就退回按任务栏对齐。
+        self.anchor_provider = None
 
     # -- 外部 API ----------------------------------------------------
     def toggle(self, rows, updated_text='', footer=''):
@@ -616,14 +673,43 @@ class DevicePanel:
             return 1.0
 
     def _place(self, w, h):
-        """固定贴在托盘旁边（任务栏靠右的那一端），不跟着鼠标指针跑。
+        """贴着托盘图标摆：**正下方**，且面板左边与图标左边对齐。
 
-        为什么不去查托盘图标的精确坐标：Shell_NotifyIconGetRect 要拿 pystray 内部
-        隐藏窗口的 hWnd + uID，不是公开接口，这套自绘外壳下调还可能直接崩。
-        通知区永远在任务栏靠右的一端，对齐任务栏就够了。
+        优先用 Shell_NotifyIconGetRect 拿图标的精确矩形（pystray 的图标 uID 固定是 0）。
+        真拿到了就：
+          · x = 图标 left（左对齐）
+          · y = 图标 bottom + 间距（正下方）
+          · 下方放不下（任务栏在屏幕底部）就翻到图标上方
+          · 再夹进图标所在那块屏的工作区，别越界
+        拿不到矩形（第三方任务栏接管等）才退回老的「按任务栏右端对齐」。
         """
         s = self._dpi_scale()
         m = max(4, int(round(8 * s)))
+        sw = user32.GetSystemMetrics(0)
+        sh = user32.GetSystemMetrics(1)
+
+        anchor = None
+        if self.anchor_provider:
+            try:
+                anchor = self.anchor_provider()
+            except Exception:
+                anchor = None
+
+        if anchor:
+            al, at, ar, ab = anchor
+            work = _monitor_work_area((al + ar) // 2, (at + ab) // 2)
+            if work:
+                wl, wt_, wr, wb = work
+            else:
+                wl, wt_, wr, wb = 0, 0, sw, sh
+            x = al                                   # 左侧对齐图标左侧
+            y = ab + m                               # 图标正下方
+            if y + h > wb:                           # 下面塞不下 → 翻到图标上方
+                y = at - h - m
+            x = max(wl + m, min(x, wr - w - m))
+            y = max(wt_ + m, min(y, wb - h - m))
+            return x, y
+
         try:
             user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
             user32.FindWindowW.restype = wintypes.HWND

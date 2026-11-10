@@ -31,6 +31,7 @@ import popup
 import state_store
 
 APP_TITLE = '设备电量'
+APP_VERSION = '1.0.2'
 APP_REG_NAME = 'DeviceBatteryTray'
 MUTEX_NAME = 'DeviceBatteryTray_SingleInstance'
 # 第二次双击时用来叫醒已经在跑的那个实例：它 wait 这个命名事件，收到就把面板弹出来
@@ -48,10 +49,10 @@ LOW_RECOVER = 2                     # 回升到 27% 以上才清零重来，免�
 NOTIFY_GAP = 20                     # 多台设备同时低电时，气泡至少隔 20 秒
 NOTIFY_SECONDS = 5                  # 气泡显示时长
 
-# 充电状态：蓝牙设备在 Windows 里只有「电量百分比」这一个属性，没有充电标志位，
-# 所以只能靠"电量在涨"来推断。为了让推断及时，单独开一条轻量探测（只读系统缓存
-# 的电量属性，不枚举 HID、不发无线请求），两分钟一次。
-CHARGE_PROBE_SECONDS = 120          # 蓝牙电量轻量探测间隔
+# 轻量探测周期：只读系统缓存里的蓝牙电量 + 枚举 HID 接口路径，不往设备发请求。
+# 新设备「插上就出现在面板」靠的就是它 —— 20 秒内必然入库，用户感知接近实时。
+# 整轮扫描（含罗技 HID++、AULA 私有协议）仍按「检测间隔」走，别把这个调太短。
+PROBE_SECONDS = 20
 CHARGE_HOLD = 90 * 60               # 探到一次上涨后，闪电再亮 90 分钟（充电时电量常是台阶式上报）
 CHARGE_MAX_JUMP = 20                # 一次涨超过 20% 视为读数抽风（比如耳机 10%→100%），不算充电
 
@@ -225,7 +226,8 @@ class BatteryTray:
         self._low_stage = {}        # 每台设备提醒到第几档：0 未提醒 / 1 报过25 / 2 报过15 / 3 报过离线
         self._notify_gen = 0        # 气泡代次，避免旧气泡把新气泡关掉
         self._last_notify = 0.0
-        self._last_probe = 0.0       # 上次蓝牙电量轻量探测的时间
+        self._hid_paths = None      # 上次探测到的 HID 接口集合，用来感知插拔
+        self._scan_requested = False  # 轻量探测发现新接口 → 请求立刻整轮扫描
         self._hev = None             # 唤起事件句柄
 
     # -- 采样 ---------------------------------------------------------
@@ -240,7 +242,6 @@ class BatteryTray:
                 state_store.update_with_scan(self.state, items, time.time())
                 state_store.save_state(self.state)
                 self.last_scan_ts = time.time()
-                self._last_probe = self.last_scan_ts
                 self.scan_error = None
             log.info('采样完成：%d 个设备', len(items))
         except Exception as e:
@@ -252,29 +253,56 @@ class BatteryTray:
                 self.scanning = False
             self.refresh_display(force=True)
 
-    def probe_charge(self):
-        """蓝牙电量轻量探测：只重读系统缓存里的电量百分比，用来判断是不是在充电。
+    def probe(self):
+        """轻量探测（20 秒一次）：蓝牙快照 + HID 接口集合，负责「实时增删」。
 
-        不做完整扫描（不枚举 HID、不往无线设备发请求），所以两分钟一次也没负担。
-        返回是否有电量的实际变化。
+        和整轮扫描的区别：
+          · 蓝牙只读系统缓存属性，不往设备发请求，20 秒一次也不打扰设备休眠
+          · HID 只枚举接口路径（微秒级），不读数、不跟罗技握手
+        作用：
+          · 新连接的设备立刻入库并刷新面板（不用等下一轮整轮扫描）
+          · 蓝牙设备从快照里消失（关机 / 出配对）→ 标记离线，面板随即收起
+          · HID 接口集合一有变化（插拔接收器）→ 触发整轮扫描
+        返回是否有变化（有变化就该强制重画面板）。
         """
+        changed = False
+
+        # ---- 蓝牙：全量快照，没出现在里的就算离线（只影响 bluetooth 通道）----
         try:
             items = hw_readers.read_bluetooth_batteries()
         except Exception:
-            log.debug('蓝牙电量探测失败', exc_info=True)
-            return False
-        if not items:
-            return False
-        with self.lock:
-            changed = state_store.patch_levels(self.state, items, time.time())
-            if changed:
-                state_store.save_state(self.state)
-                for key in changed:
-                    dev = (self.state.get('devices') or {}).get(key) or {}
-                    log.info('电量变化：%s %s%%（充电判定=%s）',
-                             dev.get('name', key), dev.get('last_level'),
-                             _charging_state(dev))
-        return bool(changed)
+            log.debug('蓝牙探测失败', exc_info=True)
+            items = None
+        if items is not None:
+            with self.lock:
+                touched = state_store.apply_snapshot(
+                    self.state, items, channel='bluetooth', now=time.time())
+                if touched:
+                    state_store.save_state(self.state)
+                    changed = True
+                    for key in touched:
+                        dev = (self.state.get('devices') or {}).get(key) or {}
+                        log.info('蓝牙更新：%s %s%% 在线=%s',
+                                 dev.get('name', key), dev.get('last_level'),
+                                 dev.get('online'))
+
+        # ---- HID：接口集合变了就说明插拔过接收器，立刻做一次整轮扫描 ----
+        try:
+            paths = set(hw_readers.list_hid_paths())
+        except Exception:
+            paths = None
+        if paths is not None:
+            if self._hid_paths is None:
+                self._hid_paths = paths
+            elif paths != self._hid_paths:
+                added = len(paths - self._hid_paths)
+                removed = len(self._hid_paths - paths)
+                self._hid_paths = paths
+                if added or removed:
+                    log.info('HID 接口变化：+%d -%d，触发整轮采样', added, removed)
+                    self._scan_requested = True
+                    changed = True
+        return changed
 
     # -- 展示 ---------------------------------------------------------
     def device_rows(self):
@@ -285,8 +313,8 @@ class BatteryTray:
             for key, dev in (self.state.get('devices') or {}).items():
                 if not dev.get('name'):
                     continue
-                # 断开太久（默认 5 天）的直接不进列表：面板/托盘提示/菜单同一套数据，
-                # 所以判定只写在这里一处，收起来就全都收了。
+                # 离线（默认 90 秒宽限）的设备不进列表：面板/托盘提示/菜单同一套数据，
+                # 所以判定只写在这里一处，收起来就全都收了。再连上会自然回来。
                 if state_store.is_stale(dev, now):
                     continue
                 val, est = state_store.estimate(dev, now)
@@ -527,6 +555,7 @@ class BatteryTray:
         items.append(Item('开机自启', self.on_toggle_autostart,
                           checked=lambda item: is_autostart_enabled()))
         items.append(Menu.SEPARATOR)
+        items.append(Item(f'版本 v{APP_VERSION}', self._noop))
         items.append(Item('退出', self.on_quit))
         return items
 
@@ -569,18 +598,27 @@ class BatteryTray:
         time.sleep(0.8)
         self.scan()
         self.check_low_battery(self.device_rows())
-        while not self.stop_event.wait(30):
-            # 每 30 秒判断一次：该整轮采样就采样，否则做轻量充电探测 / 刷新估算
+        while not self.stop_event.wait(PROBE_SECONDS):
+            # 每 20 秒一次轻量探测：新设备入库、离线出库都靠它，所以别指望更长周期
+            force = self.probe()
             interval = max(5, int(self.cfg.get('interval_minutes', 60))) * 60
             due = (self.last_scan_ts is None) or (time.time() - self.last_scan_ts >= interval)
-            if due:
+            if due or self._scan_requested:
+                self._scan_requested = False
                 self.scan()
-            elif time.time() - self._last_probe >= CHARGE_PROBE_SECONDS:
-                self._last_probe = time.time()
-                self.refresh_display(force=self.probe_charge())
             else:
-                self.refresh_display()
+                self.refresh_display(force=force)
             self.check_low_battery(self.device_rows())
+
+    def _tray_anchor(self):
+        """托盘图标的屏幕矩形，交给面板做「正下方 + 左对齐」。拿不到返回 None。"""
+        try:
+            hwnd = int(self.icon._hwnd)
+        except Exception:
+            return None
+        if not hwnd:
+            return None
+        return popup.tray_icon_rect(hwnd)
 
     def run(self):
         rows = self.device_rows()
@@ -592,6 +630,7 @@ class BatteryTray:
             title=self.tooltip(rows),
             menu=Menu(lambda: self.menu_items()),
         )
+        self.panel.anchor_provider = self._tray_anchor
         threading.Thread(target=self.worker, daemon=True).start()
         self.start_activate_listener()
         self.icon.run()

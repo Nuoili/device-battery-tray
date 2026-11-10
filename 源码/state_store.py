@@ -22,9 +22,10 @@ DEFAULT_RATE = 0.5          # %/小时，没有历史数据时的兜底
 MAX_HISTORY = 240           # 每个设备保留的样本数（约 10 天）
 RATE_WINDOW = 7 * 24 * 3600  # 只用最近 7 天的样本算速率
 FRESH_SECONDS = 600         # 10 分钟内的采样视为「实测」
-# 未连接超过这么多天就整条不再显示（缓存电量放太久已无参考价值）。
-# 设备没被删除，只是不展示；一插回来扫描到就自然重新出现。设 0 可关闭该行为。
-OFFLINE_HIDE_DAYS = 5
+# 未连接多久就从面板收起来（秒）。用户要求「离线即隐藏，下次连上再出现」，
+# 但蓝牙属性和整轮扫描都有抖动，留 90 秒宽限，避免闪进闪出。
+# 设 0 可关闭隐藏行为（离线设备继续按缓存电量展示）。
+OFFLINE_HIDE_SECONDS = 90
 
 DEFAULT_CONFIG = {
     'interval_minutes': 60,
@@ -104,15 +105,23 @@ def _calc_rate(history):
     return statistics.median(rates)
 
 
-def update_with_scan(state, scanned, now=None):
-    """用一次真实扫描结果更新状态，返回状态字典。"""
+def apply_snapshot(state, scanned, channel=None, now=None):
+    """用一份「某通道的完整快照」更新状态，返回发生变化的 key 列表。
+
+    channel 给定时只在该通道内做离线判定 —— 蓝牙轻量探测只覆盖蓝牙设备，
+    不能顺手把罗技 / AULA 那些这次没探到的设备判成离线。
+    """
     now = now or time.time()
     devices = state.setdefault('devices', {})
     live_keys = set()
+    changed = []
     for item in scanned:
         key = item['key']
         live_keys.add(key)
         dev = devices.get(key) or {}
+        is_new = key not in devices
+        prev_level = dev.get('last_level')
+        prev_online = dev.get('online', True)
         dev['name'] = item['name']
         dev['channel'] = item.get('channel', '')
         dev['status'] = item.get('status')
@@ -129,46 +138,24 @@ def update_with_scan(state, scanned, now=None):
         dev['rate'] = _calc_rate(dev['history'])
         dev['online'] = connected
         devices[key] = dev
-    # 未扫描到的标记为离线
+        if is_new or prev_level != dev['last_level'] or prev_online != connected:
+            changed.append(key)
+    # 未出现在快照里的设备标记为离线（只针对指定通道）
     for key, dev in devices.items():
-        if key not in live_keys:
+        if key in live_keys:
+            continue
+        if channel is not None and dev.get('channel') != channel:
+            continue
+        if dev.get('online', True):
             dev['online'] = False
-    return state
-
-
-def patch_levels(state, items, now=None):
-    """只更新「已有记录」的电量，不碰在线状态。
-
-    给高频的充电探测用：蓝牙电量可以在两分钟内轻量重读一次，但一次只探到部分设备，
-    不能像整轮扫描那样把没探到的都判成离线。返回真正发生变化的 key 列表。
-    """
-    now = now or time.time()
-    devices = state.setdefault('devices', {})
-    changed = []
-    for item in items:
-        key = item.get('key')
-        level = item.get('level')
-        dev = devices.get(key)
-        if not dev or level is None:
-            continue
-        if item.get('online') is False:
-            dev['online'] = False          # 蓝牙断了：别再把缓存电量当实时值
-            continue
-        level = int(level)
-        if dev.get('last_level') == level:
-            dev['last_ts'] = now          # 值没变也刷新时间，避免展示值被"外推"成掉电
-            continue
-        dev['last_level'] = level
-        dev['last_ts'] = now
-        dev['last_seen'] = now
-        dev['online'] = True
-        hist = dev.get('history') or []
-        if not hist or hist[-1][1] != level or (now - hist[-1][0]) > 300:
-            hist.append([now, level])
-        dev['history'] = hist[-MAX_HISTORY:]
-        dev['rate'] = _calc_rate(dev['history'])
-        changed.append(key)
+            changed.append(key)
     return changed
+
+
+def update_with_scan(state, scanned, now=None):
+    """用一次真实扫描结果更新状态，返回状态字典。"""
+    apply_snapshot(state, scanned, None, now)
+    return state
 
 
 def estimate(dev, now=None):
@@ -207,22 +194,24 @@ def last_online_ts(dev):
         return None
 
 
-def is_stale(dev, now=None, days=None):
-    """离线太久的设备是否该从面板里收起来。
+def is_stale(dev, now=None, seconds=None):
+    """离线设备是否该从面板里收起来。
 
-    只有「未连接 + 上次连上距今超过 days 天」才算过期；在线设备永远不算，
-    时间戳缺失也无从判断，按「不过期」保留。
+    规则（2026-11-11 按用户要求改）：**一离线就收，再连上自动回来**。
+    留 OFFLINE_HIDE_SECONDS 的宽限，避免蓝牙属性抖动导致闪进闪出。
+    在线设备永远不算过期；时间戳缺失按「过期」处理 —— 没有时间戳说明数据不完整，
+    留着反而会长期显示一个不知道多久以前的电量。
     """
     if dev.get('online', True):
         return False
-    days = OFFLINE_HIDE_DAYS if days is None else days
-    if not days or days <= 0:
+    secs = OFFLINE_HIDE_SECONDS if seconds is None else seconds
+    if not secs or secs <= 0:
         return False
     now = now or time.time()
-    ts = last_online_ts(dev)
+    ts = last_online_ts(dev) or dev.get('last_seen')
     if ts is None:
-        return False
-    return (now - ts) > days * 86400
+        return True
+    return (now - ts) > secs
 
 
 def describe_age(seconds):
