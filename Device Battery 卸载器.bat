@@ -61,6 +61,8 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "Device Batte
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v DeviceBatteryTray /f >nul 2>&1
 
 rem ---- 3. 快捷方式（桌面 / 开始菜单）----
+rem 桌面可能被重定向（OneDrive / 自定义位置），先问系统要真实桌面路径再删
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do del /f /q "%%D\Device Battery.lnk" >nul 2>&1
 del /f /q "%USERPROFILE%\Desktop\Device Battery.lnk" >nul 2>&1
 del /f /q "%PUBLIC%\Desktop\Device Battery.lnk" >nul 2>&1
 del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Device Battery.lnk" >nul 2>&1

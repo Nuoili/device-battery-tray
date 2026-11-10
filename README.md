@@ -27,12 +27,18 @@ Windows 自带的任务栏电池只显示「本机」电量。蓝牙键鼠、耳
 
 ## 安装与使用
 
-1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBattery-v1.0.5.exe`（下载后可以随手改名成 `Device Battery.exe`，程序不依赖文件名），放到任意文件夹（建议 `D:\Device Battery\`），双击启动。同一页还有 `DeviceBattery-Uninstaller-v1.0.5.bat`，改成 `Device Battery 卸载器.bat` 放进同一目录即可用
+1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBattery-v1.0.6.exe`（下载后可以随手改名成 `Device Battery.exe`，程序不依赖文件名），放到任意文件夹（建议 `D:\Device Battery\`），双击启动。同一页还有 `DeviceBattery-Uninstaller-v1.0.6.bat`，改成 `Device Battery 卸载器.bat` 放进同一目录即可用
    > GitHub 的附件名不允许空格，会把它替换成点号，所以 Release 里统一用不带空格的写法；软件本身的名字始终是 `Device Battery`。
 2. 图标默认在托盘 `^` 溢出区 —— 点开 `^`，按住图标拖到常显区松手即可固定
 3. **左键单击** = 弹面板（再点一次收起，点面板外面也会收）；**右键** = 设置菜单
 
 面板贴着**托盘图标**摆：正下方、且面板左边缘与图标左边缘对齐（`Shell_NotifyIconGetRect` 取图标精确矩形；任务栏在屏幕底部时自动翻到图标上方）。不跟鼠标指针跑。
+
+### 桌面快捷方式
+
+- 第一次启动（以及每次换新版本后第一次启动）会自动在**桌面**和开始菜单补一张 `Device Battery` 快捷方式；你手动删掉了就删掉了，同一版本内不会再重建
+- 桌面路径走 `SHGetKnownFolderPath(FOLDERID_Desktop)`，所以桌面被重定向到别的盘（OneDrive 接管、自定义到 `E:\桌面` 之类）时也落在你看得见的那个桌面上，不会掉进 `%USERPROFILE%\Desktop` 这个空壳目录
+- 想随时重做：右键托盘图标 → **创建快捷方式（桌面 + 开始菜单）**
 
 ## 电量颜色分级
 
@@ -134,7 +140,7 @@ app.log       运行日志，出问题看这个
 
 > 从 v1.0.4 及以前升级上来时，数据原本在 `%APPDATA%\DeviceBatteryTray\`。首次启动会自动把整个目录改名带过来（`state_store.migrate_legacy_dir`），配置和历史不丢。
 
-彻底卸载：双击程序目录里的 **`Device Battery 卸载器.bat`**，它会结束进程、移除开机自启（HKCU Run 键 `Device Battery`，顺带清掉旧键名 `DeviceBatteryTray`）、删掉桌面与开始菜单的快捷方式、把程序目录整个送进回收站，并单独问一句用户数据留不留。
+彻底卸载：双击程序目录里的 **`Device Battery 卸载器.bat`**，它会结束进程、移除开机自启（HKCU Run 键 `Device Battery`，顺带清掉旧键名 `DeviceBatteryTray`）、删掉桌面与开始菜单的快捷方式（桌面按系统真实路径取，重定向到别的盘也能删干净）、把程序目录整个送进回收站，并单独问一句用户数据留不留。
 
 手动卸载：右键托盘 → 退出 → 删 exe → 删 `%APPDATA%\Device Battery` 文件夹。开过自启的记得先在菜单里取消。
 

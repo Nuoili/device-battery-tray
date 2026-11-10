@@ -32,7 +32,7 @@ import popup
 import state_store
 
 APP_TITLE = 'Device Battery'          # 软件名（托盘提示、菜单、窗口标题、文件名都跟它走）
-APP_VERSION = '1.0.5'
+APP_VERSION = '1.0.6'
 # 开机自启的注册表值名。v1.0.5 起统一成产品名，旧版留下的值会在启动时自动迁过来。
 APP_REG_NAME = 'Device Battery'
 LEGACY_REG_NAMES = ('DeviceBatteryTray',)
@@ -192,15 +192,16 @@ def _shortcut_target():
 
 
 def shortcut_paths():
-    """桌面 + 开始菜单两张「Device Battery.lnk」的完整路径。"""
+    """桌面 + 开始菜单两张「Device Battery.lnk」的完整路径。
+
+    桌面走系统已知文件夹：桌面被重定向到别的盘（OneDrive / 自定义位置）时，
+    写 %USERPROFILE%\\Desktop 会落到一个用户根本看不见的空目录。
+    """
+    import shortcut
     name = APP_TITLE + '.lnk'
-    home = os.environ.get('USERPROFILE') or os.path.expanduser('~')
-    appdata = os.environ.get('APPDATA') or ''
-    return [
-        os.path.join(home, 'Desktop', name),
-        os.path.join(appdata, 'Microsoft', 'Windows', 'Start Menu',
-                     'Programs', name),
-    ]
+    desktop = shortcut.desktop_dir()
+    programs = shortcut.programs_dir()
+    return [os.path.join(desktop, name), os.path.join(programs, name)]
 
 
 def create_shortcuts():
@@ -219,6 +220,38 @@ def create_shortcuts():
             log.debug('创建快捷方式失败: %s', lnk, exc_info=True)
             failed.append(lnk)
     return made, failed
+
+
+def ensure_shortcuts(cfg):
+    """首次运行（或换版本后第一次运行）静默补一张桌面快捷方式。
+
+    只补桌面，开始菜单那张交给菜单里的手动项；用户自己删掉了就删掉了，
+    同一个版本内不再反复重建，换新版本时再补一次。
+    返回是否有新建动作。
+    """
+    if cfg.get('shortcut_version') == APP_VERSION:
+        return False
+    try:
+        import shortcut
+        desktop_lnk = shortcut_paths()[0]
+        if os.path.exists(desktop_lnk):
+            cfg['shortcut_version'] = APP_VERSION
+            state_store.save_config(cfg)
+            return False
+    except Exception:
+        log.debug('检查桌面快捷方式失败', exc_info=True)
+        return False
+    made, failed = create_shortcuts()
+    if made:
+        log.info('已自动创建快捷方式：%s', ' | '.join(made))
+    if failed:
+        log.debug('自动创建快捷方式失败：%s', ' | '.join(failed))
+    cfg['shortcut_version'] = APP_VERSION
+    try:
+        state_store.save_config(cfg)
+    except Exception:
+        log.debug('记录快捷方式标记失败', exc_info=True)
+    return bool(made)
 
 
 def _clean_hist(dev):
@@ -921,6 +954,10 @@ def main():
         log.info('数据目录已迁移到 %s', state_store.DATA_DIR)
     migrate_autostart()
     cfg = state_store.load_config()
+    try:
+        ensure_shortcuts(cfg)          # 桌面图标缺失就补一张（每版本只补一次）
+    except Exception:
+        log.debug('补建快捷方式失败', exc_info=True)
     state = state_store.load_state()
     try:
         BatteryTray(cfg, state).run()

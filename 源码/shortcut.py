@@ -6,14 +6,17 @@
 打出来的 exe 一样能用。
 
 用法：
-    from shortcut import create_shortcut
-    create_shortcut(r'C:\\Users\\me\\Desktop\\Device Battery.lnk', r'D:\\x\\Device Battery.exe')
+    from shortcut import create_shortcut, known_folder, FOLDERID_Desktop
+    desktop = known_folder(FOLDERID_Desktop)
+    create_shortcut(os.path.join(desktop, 'Device Battery.lnk'),
+                    r'D:\\x\\Device Battery.exe')
 """
 import ctypes
 import os
 from ctypes import wintypes
 
 _ole32 = ctypes.WinDLL('ole32', use_last_error=True)
+_shell32 = ctypes.WinDLL('shell32', use_last_error=True)
 
 CLSCTX_INPROC_SERVER = 0x1
 
@@ -33,6 +36,71 @@ class GUID(ctypes.Structure):
 CLSID_ShellLink = GUID(0x00021401, 0, 0, (0xC0, 0, 0, 0, 0, 0, 0, 0x46))
 IID_IShellLinkW = GUID(0x000214F9, 0, 0, (0xC0, 0, 0, 0, 0, 0, 0, 0x46))
 IID_IPersistFile = GUID(0x0000010B, 0, 0, (0xC0, 0, 0, 0, 0, 0, 0, 0x46))
+
+# 「用户桌面」「用户开始菜单程序」这两个已知文件夹的 GUID。
+# 桌面可能被重定向（OneDrive 接管、D 盘/其它盘自定义位置），
+# 这时 %USERPROFILE%\Desktop 只是个没人看的空壳，必须问系统要真实路径。
+FOLDERID_Desktop = GUID(0xB4BFCC3A, 0xDB2C, 0x424C,
+                        (0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+FOLDERID_Programs = GUID(0xA77F5D77, 0x2E2B, 0x44C3,
+                         (0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51))
+
+_shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+_shell32.SHGetKnownFolderPath.argtypes = [
+    ctypes.POINTER(GUID), wintypes.DWORD, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_void_p)]
+_ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+_ole32.CoTaskMemFree.restype = None
+
+
+def known_folder(folder_id):
+    """问系统要已知文件夹的真实路径（如真实桌面）。失败返回 None。"""
+    try:
+        buf = ctypes.c_void_p()
+        hr = _shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None,
+                                           ctypes.byref(buf))
+        if hr != 0 or not buf.value:
+            return None
+        try:
+            path = ctypes.wstring_at(buf.value)
+        finally:
+            _ole32.CoTaskMemFree(buf)
+        return path or None
+    except Exception:
+        return None
+
+
+def _desktop_fallback():
+    """SHGetKnownFolderPath 失效时退到注册表里的重定向路径，再退默认路径。"""
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion'
+                r'\Explorer\User Shell Folders') as k:
+            raw, _ = winreg.QueryValueEx(k, 'Desktop')
+        path = os.path.expandvars(raw)
+        if path:
+            return path
+    except Exception:
+        pass
+    home = os.environ.get('USERPROFILE') or os.path.expanduser('~')
+    return os.path.join(home, 'Desktop')
+
+
+def desktop_dir():
+    """当前用户真实桌面目录（考虑重定向）。"""
+    return known_folder(FOLDERID_Desktop) or _desktop_fallback()
+
+
+def programs_dir():
+    """当前用户开始菜单 Programs 目录。"""
+    path = known_folder(FOLDERID_Programs)
+    if path:
+        return path
+    appdata = os.environ.get('APPDATA') or ''
+    return os.path.join(appdata, 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+
 
 # 各方法在 vtable 里的槽位（IUnknown 占前 3 个）
 _VT_SET_DESCRIPTION = 7

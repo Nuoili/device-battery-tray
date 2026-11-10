@@ -3,8 +3,8 @@
 # 文件「属性 → 详细信息」里看到的名称就来自这里。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 5, 0),
-    prodvers=(1, 0, 5, 0),
+    filevers=(1, 0, 6, 0),
+    prodvers=(1, 0, 6, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -19,12 +19,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Nuoili'),
           StringStruct('FileDescription', 'Device Battery'),
-          StringStruct('FileVersion', '1.0.5'),
+          StringStruct('FileVersion', '1.0.6'),
           StringStruct('InternalName', 'Device Battery'),
           StringStruct('LegalCopyright', 'MIT License'),
           StringStruct('OriginalFilename', 'Device Battery.exe'),
           StringStruct('ProductName', 'Device Battery'),
-          StringStruct('ProductVersion', '1.0.5')
+          StringStruct('ProductVersion', '1.0.6')
         ]
       )
     ]),
