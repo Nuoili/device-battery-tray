@@ -27,7 +27,8 @@ Windows 自带的任务栏电池只显示「本机」电量。蓝牙键鼠、耳
 
 ## 安装与使用
 
-1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `Device Battery-v1.0.5.exe`，放到任意文件夹（建议 `D:\Device Battery\`），双击启动。同一页还有 `Device Battery-Uninstaller-v1.0.5.bat`，留着以后卸载用
+1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBattery-v1.0.5.exe`（下载后可以随手改名成 `Device Battery.exe`，程序不依赖文件名），放到任意文件夹（建议 `D:\Device Battery\`），双击启动。同一页还有 `DeviceBattery-Uninstaller-v1.0.5.bat`，改成 `Device Battery 卸载器.bat` 放进同一目录即可用
+   > GitHub 的附件名不允许空格，会把它替换成点号，所以 Release 里统一用不带空格的写法；软件本身的名字始终是 `Device Battery`。
 2. 图标默认在托盘 `^` 溢出区 —— 点开 `^`，按住图标拖到常显区松手即可固定
 3. **左键单击** = 弹面板（再点一次收起，点面板外面也会收）；**右键** = 设置菜单
 
@@ -137,7 +138,7 @@ app.log       运行日志，出问题看这个
 
 手动卸载：右键托盘 → 退出 → 删 exe → 删 `%APPDATA%\Device Battery` 文件夹。开过自启的记得先在菜单里取消。
 
-> 卸载器会先把「自己所在的文件夹」判定一遍（找 `Device Battery*.exe` / `BatteryTray*.exe` / `设备电量*.exe` 或 `源码\battery_tray.py`），认不出就拒绝执行 —— 防止把它误拷到别的目录后双击，把那个目录整个删掉。
+> 卸载器会先把「自己所在的文件夹」判定一遍（找 `Device Battery*.exe` / `DeviceBattery*.exe` / `BatteryTray*.exe` / `设备电量*.exe` 或 `源码\battery_tray.py`），认不出就拒绝执行 —— 防止把它误拷到别的目录后双击，把那个目录整个删掉。
 
 ## 资源占用
 

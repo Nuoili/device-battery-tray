@@ -21,6 +21,7 @@ rem      必须先确认这确实是本程序目录，否则一律中止 ----
 set "OKDIR="
 for %%f in ("%APPDIR%\*.exe") do (
     echo %%~nf | findstr /i /c:"Device Battery" >nul && set "OKDIR=1"
+    echo %%~nf | findstr /i /c:"DeviceBattery" >nul && set "OKDIR=1"
     echo %%~nf | findstr /i /c:"BatteryTray" >nul && set "OKDIR=1"
     echo %%~nf | findstr /c:"设备电量" >nul && set "OKDIR=1"
 )
@@ -48,11 +49,12 @@ echo.
 choice /c YN /m "确认卸载吗 [Y=卸载 / N=取消]"
 if errorlevel 2 goto :cancel
 
-rem ---- 1. 结束进程：Release 里 exe 可能被改名，把新旧常见名字都清一遍 ----
-taskkill /f /im "Device Battery.exe" >nul 2>&1
-taskkill /f /im "设备电量.exe" >nul 2>&1
-taskkill /f /im "BatteryTray.exe" >nul 2>&1
-taskkill /f /im "DeviceBatteryTray.exe" >nul 2>&1
+rem ---- 1. 结束进程：exe 可能被改名（Release 下载的叫 DeviceBattery-vX.exe），
+rem      用通配符把本产品可能的名字全清一遍 ----
+taskkill /f /im "Device Battery*.exe" >nul 2>&1
+taskkill /f /im "DeviceBattery*.exe" >nul 2>&1
+taskkill /f /im "设备电量*.exe" >nul 2>&1
+taskkill /f /im "BatteryTray*.exe" >nul 2>&1
 
 rem ---- 2. 移除开机自启（只删值，不删整个 Run 键）----
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "Device Battery" /f >nul 2>&1
