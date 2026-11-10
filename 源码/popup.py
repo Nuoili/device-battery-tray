@@ -517,6 +517,8 @@ class DevicePanel:
         self._block_until = 0.0
         self._stopping = False
         self._last_key = None
+        self._sig = None              # 上一次画出去的内容指纹（判断要不要重绘）
+        self._keys = ()               # 上一次画出去的行（按 key），用来区分「电量变」和「设备增减」
         self._bg = None
         self._bg_key = None
         # 由 battery_tray 注入：返回托盘图标的屏幕矩形 (l, t, r, b)，拿不到返回 None。
@@ -653,7 +655,9 @@ class DevicePanel:
                 self._hide(external=False)
             else:
                 self._show(rows or [], updated, footer)
-        elif action in ('refresh', 'show'):
+        elif action == 'refresh':
+            self._refresh(rows or [], updated, footer)
+        elif action == 'show':
             self._show(rows or [], updated, footer)
 
     # -- 显示 / 隐藏 -------------------------------------------------
@@ -740,6 +744,46 @@ class DevicePanel:
             pass
         return max(0, user32.GetSystemMetrics(0) - w - m), max(0, user32.GetSystemMetrics(1) - h - m)
 
+    def _sig_of(self, rows, updated, footer):
+        """内容指纹：行内容 + 行顺序 + 抬头文字。指纹相同就不用重绘。"""
+        shown = rows[:7]
+        return (tuple((r.get('key'),
+                       None if r.get('level') is None else round(float(r.get('level')), 1),
+                       bool(r.get('estimated')), bool(r.get('charging')),
+                       r.get('online') is not False, r.get('name')) for r in shown),
+                updated, footer)
+
+    def _refresh(self, rows, updated, footer):
+        """**只重绘内容**，不动窗口：电量变化走这条通道。
+
+        为什么和设备增删分开：以前每变 1% 就把整块面板重建一遍 —— 重新算尺寸、
+        重新贴窗口、重抓磨砂底图再 ShowWindow，肉眼能看到一次闪。这里沿用已有的
+        位置 / 尺寸 / 底图，只把内容层重新画一遍再 UpdateLayeredWindow。
+
+        行结构真的变了（设备增删、行数变化导致高度变）才退回 _show 整块重建。
+        """
+        if not self._hwnd or not self._visible or self._bg is None:
+            self._show(rows, updated, footer)
+            return
+        sig = self._sig_of(rows, updated, footer)
+        if sig == self._sig:
+            return
+        keys = tuple(r.get('key') for r in rows[:7])
+        if len(keys) != len(self._keys) or set(keys) != set(self._keys):
+            self._show(rows, updated, footer)       # 设备增减 → 重建
+            return
+        s = self._dpi_scale()
+        content = render_panel(rows, s, updated_text=updated, footer=footer)
+        x1, y1, x2, y2 = self._rect
+        if content.size != (x2 - x1, y2 - y1):
+            self._show(rows, updated, footer)       # 高度变了 → 重建
+            return
+        img = compose_panel(content, self._bg, s)
+        pad = int(round(SHADOW_PAD * s))
+        if not self._paint(img, x1 - pad, y1 - pad):
+            return
+        self._sig = sig
+
     def _show(self, rows, updated, footer):
         s = self._dpi_scale()
         content = render_panel(rows, s, updated_text=updated, footer=footer)
@@ -770,6 +814,8 @@ class DevicePanel:
         self._shown_at = time.time()
         self._top_at = self._shown_at
         self._raise_top()          # 每次弹出都重新置顶，别被别的置顶窗口压住
+        self._sig = self._sig_of(rows, updated, footer)
+        self._keys = tuple(r.get('key') for r in rows[:7])
         with self._lock:
             self._last_key = (tuple((r.get('key'), r.get('level')) for r in rows), updated)
 
@@ -836,6 +882,8 @@ class DevicePanel:
         if self._hwnd:
             user32.ShowWindow(self._hwnd, SW_HIDE)
         self._visible = False
+        self._sig = None      # 下次弹出必须重画，不能沿用关闭前的内容指纹
+        self._keys = ()
         if external:
             # 让紧接着的托盘点击（松开鼠标）不要再把面板弹开
             self._block_until = time.time() + 0.5

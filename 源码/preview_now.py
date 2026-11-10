@@ -16,7 +16,7 @@ import hw_readers
 import popup
 import state_store
 
-scanned = hw_readers.scan_all()
+scanned, _chans = hw_readers.scan_all()
 for r in scanned:
     print('扫描 %3d%% %-28s %s online=%s charging=%s'
           % (r['level'], r['name'], r['channel'], r.get('online'), r.get('charging')))

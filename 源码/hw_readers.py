@@ -88,6 +88,116 @@ PKEY_FRIENDLY = _pkey('{A45C254E-DF1C-4EFD-8020-67D146A850E0}', 14)  # DEVPKEY_D
 PKEY_IS_CONNECTED = _pkey('{83DA6326-97A6-4088-9453-A1923F573B29}', 15)
 
 
+# ------------------------------------------------- 经典蓝牙链路状态（bthprops）
+# 为什么需要这个：`DEVPKEY_Bluetooth_Battery` 是**缓存**的 —— 经典蓝牙耳机断开后，
+# 属性里照样留着断电前的电量，光看属性会把「已经关机的耳机」一直判成在线
+# （实测 Beats Studio Buds 断开后仍带着 100%）。bthprops 的 fConnected 是实时的。
+# 注意：它只枚举得到经典蓝牙（BTHENUM\DEV_*），BLE-only 设备（BTHLE\DEV_*）看不到，
+# 那些设备仍然只能用「属性是否还在」来判断。
+_bth = ctypes.WinDLL('bthprops.cpl', use_last_error=True)
+
+
+class _SYSTEMTIME(ctypes.Structure):
+    _fields_ = [('wYear', wt.WORD), ('wMonth', wt.WORD), ('wDayOfWeek', wt.WORD),
+                ('wDay', wt.WORD), ('wHour', wt.WORD), ('wMinute', wt.WORD),
+                ('wSecond', wt.WORD), ('wMilliseconds', wt.WORD)]
+
+
+class _BT_ADDR(ctypes.Structure):
+    _fields_ = [('ullLong', ctypes.c_ulonglong)]
+
+
+class _BT_DEVICE_INFO(ctypes.Structure):
+    _fields_ = [('dwSize', wt.DWORD),
+                ('Address', _BT_ADDR),
+                ('ulClassofDevice', wt.ULONG),
+                ('fConnected', wt.BOOL),
+                ('fRemembered', wt.BOOL),
+                ('fAuthenticated', wt.BOOL),
+                ('stLastSeen', _SYSTEMTIME),
+                ('stLastUsed', _SYSTEMTIME),
+                ('szName', wt.WCHAR * 248)]
+
+
+class _BT_SEARCH_PARAMS(ctypes.Structure):
+    _fields_ = [('dwSize', wt.DWORD),
+                ('fReturnAuthenticated', wt.BOOL),
+                ('fReturnRemembered', wt.BOOL),
+                ('fReturnUnknown', wt.BOOL),
+                ('fReturnConnected', wt.BOOL),
+                ('fIssueInquiry', wt.BOOL),
+                ('cTimeoutMultiplier', ctypes.c_ubyte),
+                ('hRadio', wt.HANDLE)]
+
+
+class _BT_RADIO_PARAMS(ctypes.Structure):
+    _fields_ = [('dwSize', wt.DWORD)]
+
+
+try:
+    _bth.BluetoothFindFirstRadio.restype = wt.HANDLE
+    _bth.BluetoothFindFirstRadio.argtypes = [ctypes.POINTER(_BT_RADIO_PARAMS),
+                                             ctypes.POINTER(wt.HANDLE)]
+    _bth.BluetoothFindNextRadio.argtypes = [wt.HANDLE, ctypes.POINTER(wt.HANDLE)]
+    _bth.BluetoothFindRadioClose.argtypes = [wt.HANDLE]
+    _bth.BluetoothFindFirstDevice.restype = wt.HANDLE
+    _bth.BluetoothFindFirstDevice.argtypes = [ctypes.POINTER(_BT_SEARCH_PARAMS),
+                                              ctypes.POINTER(_BT_DEVICE_INFO)]
+    _bth.BluetoothFindNextDevice.argtypes = [wt.HANDLE, ctypes.POINTER(_BT_DEVICE_INFO)]
+    _bth.BluetoothFindDeviceClose.argtypes = [wt.HANDLE]
+    _BTH_OK = True
+except Exception:
+    _BTH_OK = False
+
+
+def classic_bluetooth_links():
+    """返回 {mac(小写): 是否连着}，只覆盖经典蓝牙设备。
+
+    不发 inquiry（`fIssueInquiry=False`），只列已配对/已认证的，实测 10~30ms，
+    可以放进 3 秒一次的轻量探测里。枚举失败返回空字典 —— 调用方必须把「空」当成
+    「这次不知道」，不能当成「全都断开了」。
+    """
+    if not _BTH_OK:
+        return {}
+    out = {}
+    find_radio = None
+    try:
+        rp = _BT_RADIO_PARAMS(ctypes.sizeof(_BT_RADIO_PARAMS))
+        radio = wt.HANDLE()
+        find_radio = _bth.BluetoothFindFirstRadio(ctypes.byref(rp), ctypes.byref(radio))
+        if not find_radio:
+            return {}
+        while True:
+            sp = _BT_SEARCH_PARAMS(ctypes.sizeof(_BT_SEARCH_PARAMS),
+                                   True, True, False, True, False, 0, radio)
+            info = _BT_DEVICE_INFO()
+            info.dwSize = ctypes.sizeof(_BT_DEVICE_INFO)
+            find_dev = _bth.BluetoothFindFirstDevice(ctypes.byref(sp), ctypes.byref(info))
+            while find_dev:
+                mac = '%012x' % (info.Address.ullLong & 0xFFFFFFFFFFFF)
+                out[mac] = bool(info.fConnected)
+                info2 = _BT_DEVICE_INFO()
+                info2.dwSize = ctypes.sizeof(_BT_DEVICE_INFO)
+                if not _bth.BluetoothFindNextDevice(find_dev, ctypes.byref(info2)):
+                    break
+                info = info2
+            if find_dev:
+                _bth.BluetoothFindDeviceClose(find_dev)
+            nxt = wt.HANDLE()
+            if not _bth.BluetoothFindNextRadio(find_radio, ctypes.byref(nxt)):
+                break
+            radio = nxt
+    except Exception:
+        return out
+    finally:
+        if find_radio:
+            try:
+                _bth.BluetoothFindRadioClose(find_radio)
+            except Exception:
+                pass
+    return out
+
+
 def _devnode_prop(devinst, key, buflen=512):
     buf = ctypes.create_string_buffer(buflen)
     size = wt.ULONG(buflen)
@@ -111,26 +221,30 @@ def list_present_instance_ids():
 def read_bluetooth_batteries():
     """返回所有能在系统属性里读到电量的设备（蓝牙为主）。
 
-    「在线」的判定改了（2026-11-11 实测结论）：
-    `DEVPKEY_Device_IsConnected` 对 BLE 耳机 / BLE 键鼠全部返回 0 —— 它们的 LE 链路
-    是按需建立的，电量读一次就断，链路状态和「人在不在用」不是一回事。用它判在线会
-    把正在听歌的耳机判成离线，进而被隐藏。
+    「在线」判定分两条路（2026-11-11 实测结论）：
 
-    实测另一个信号更可靠：**断开（关机 / 出配对）后 `DEVPKEY_Bluetooth_Battery` 会消失**，
-    只有连着的设备才带着电量出现在属性里（Keychron、Joy-Con、HECATE 断开时都取不到电量）。
-    所以这里「能读到电量」就直接算在线；掉线由调用方按「本轮快照里没有它」判定。
+    · **经典蓝牙**（`BTHENUM\\Dev_*`，A2DP/HFP 耳机音箱那类）走 bthprops 的
+      `fConnected` —— 实时、可靠。为什么不能只看属性：`DEVPKEY_Bluetooth_Battery`
+      是**缓存**的，耳机断开后属性里还留着断电前的电量（实测 Beats Studio Buds
+      断开后仍报 100%），拿它判在线会让已经离线的设备一直挂在面板上。
+    · **BLE**（`BTHLE\\Dev_*`）不在 bthprops 的枚举范围里，只能按「属性还在」算在线。
+      BLE 断开后节点和属性都会随驱动卸载消失，所以这条仍然成立。
+
+    同一 MAC 会出现在多个服务节点上（主节点 + 各 profile），按 key 聚合，
+    只要有一个节点给出「断开」，就以断开为准。
     """
-    out = []
+    links = classic_bluetooth_links()
+    raw = []
     for inst in list_present_instance_ids():
         devinst = wt.ULONG()
         if _cm.CM_Locate_DevNodeW(ctypes.byref(devinst), inst, 0) != 0:
             continue
-        ptype, raw = _devnode_prop(devinst, PKEY_BATTERY, 16)
-        if raw is None:
+        ptype, pbuf = _devnode_prop(devinst, PKEY_BATTERY, 16)
+        if pbuf is None:
             continue
         # DEVPROP_TYPE_UINT32 / UINT16 / BYTE 都可能是
         if ptype in (2, 3, 4, 5, 6, 7):     # BYTE / UINT16 / UINT32 系
-            level = int.from_bytes(raw[:4], 'little')
+            level = int.from_bytes(pbuf[:4], 'little')
         else:
             continue
         if not (0 <= level <= 100):
@@ -140,10 +254,9 @@ def read_bluetooth_batteries():
         if not name:
             name = inst.split('\\')[1] if '\\' in inst else inst
         mac = bluetooth_mac(inst)
-        # 链路状态只作为参考值保留，不再用来判在线（见 docstring）
-        _, conn_raw = _devnode_prop(devinst, PKEY_IS_CONNECTED, 16)
-        connected = None if not conn_raw else bool(int.from_bytes(conn_raw[:4], 'little'))
-        out.append({
+        # 经典链路状态：只有 bthprops 枚举得到的 MAC 才有值，BLE 是 None
+        link = links.get(mac) if mac else None
+        raw.append({
             'key': ('bt:' + mac) if mac else ('bt:' + inst),
             'name': clean_name(name),
             'level': level,
@@ -151,11 +264,29 @@ def read_bluetooth_batteries():
             'instance': inst,
             'status': None,
             'charging': None,      # 系统属性只给电量，给不了充电状态
-            'online': True,        # 能读到电量 = 此刻连着（含缓存但有值的情况）
-            'link_connected': connected,
+            'online': True if link is None else bool(link),
+            'link_connected': link,
             'ts': time.time(),
         })
-    return out
+
+    # 同一台设备的多个节点聚合成一条：电量取第一个读到的，在线状态「一断则断」
+    merged = {}
+    order = []
+    for it in raw:
+        key = it['key']
+        if key not in merged:
+            merged[key] = it
+            order.append(key)
+            continue
+        cur = merged[key]
+        if cur.get('link_connected') is not False and it.get('link_connected') is False:
+            cur['online'] = False
+            cur['link_connected'] = False
+        # 名字取更像人名的那个（带空格的优先）
+        if len(it['name']) > len(cur['name']):
+            cur['name'] = it['name']
+    return [merged[k] for k in order]
+
 
 
 # ---------------------------------------------------------------- HID / SetupAPI
@@ -569,19 +700,21 @@ def read_aula_batteries():
 
 # ---------------------------------------------------------------- 汇总
 def scan_all():
+    """整轮扫描。返回 (items, ok_channels)。
+
+    ok_channels 是**这次真的读成功**的通道集合 —— 某个读取器抛异常时它就不在里面，
+    调用方据此跳过该通道的离线判定，免得一次读取失败把所有设备都判成离线（面板瞬间清空）。
+    """
     items = []
-    try:
-        items.extend(read_bluetooth_batteries())
-    except Exception:
-        pass
-    try:
-        items.extend(read_logitech_batteries())
-    except Exception:
-        pass
-    try:
-        items.extend(read_aula_batteries())
-    except Exception:
-        pass
+    ok = set()
+    for channel, reader in (('bluetooth', read_bluetooth_batteries),
+                            ('logitech', read_logitech_batteries),
+                            ('aula', read_aula_batteries)):
+        try:
+            items.extend(reader())
+            ok.add(channel)
+        except Exception:
+            pass
     # 同一把键盘在 2.4G 下已经有实时电量时，蓝牙那条只剩过期缓存，隐藏掉
     aula_names = [it['name'].upper() for it in items if it['channel'] == 'aula']
     if aula_names:
@@ -594,11 +727,12 @@ def scan_all():
         k = it['key']
         if k not in uniq:
             uniq[k] = it
-    return list(uniq.values())
+    return list(uniq.values()), ok
 
 
 if __name__ == '__main__':
     t0 = time.time()
-    for d in scan_all():
+    devs, chans = scan_all()
+    for d in devs:
         print(f"[{d['level']:3d}%] {d['name']:<32} ({d['channel']})  {d['key']}")
-    print(f"耗时 {time.time() - t0:.2f}s")
+    print(f"通道 {sorted(chans)}  耗时 {time.time() - t0:.2f}s")

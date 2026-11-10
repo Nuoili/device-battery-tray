@@ -31,7 +31,7 @@ import popup
 import state_store
 
 APP_TITLE = '设备电量'
-APP_VERSION = '1.0.2'
+APP_VERSION = '1.0.3'
 APP_REG_NAME = 'DeviceBatteryTray'
 MUTEX_NAME = 'DeviceBatteryTray_SingleInstance'
 # 第二次双击时用来叫醒已经在跑的那个实例：它 wait 这个命名事件，收到就把面板弹出来
@@ -50,9 +50,10 @@ NOTIFY_GAP = 20                     # 多台设备同时低电时，气泡至少
 NOTIFY_SECONDS = 5                  # 气泡显示时长
 
 # 轻量探测周期：只读系统缓存里的蓝牙电量 + 枚举 HID 接口路径，不往设备发请求。
-# 新设备「插上就出现在面板」靠的就是它 —— 20 秒内必然入库，用户感知接近实时。
+# 实测一轮 10~20ms（蓝牙属性 13ms + 经典链路 3ms + HID 接口枚举 5ms 上下），
+# 所以放到 3 秒一次 —— 用户要求「设备断开 3 秒内必须从面板消失」。
 # 整轮扫描（含罗技 HID++、AULA 私有协议）仍按「检测间隔」走，别把这个调太短。
-PROBE_SECONDS = 20
+PROBE_SECONDS = 3
 CHARGE_HOLD = 90 * 60               # 探到一次上涨后，闪电再亮 90 分钟（充电时电量常是台阶式上报）
 CHARGE_MAX_JUMP = 20                # 一次涨超过 20% 视为读数抽风（比如耳机 10%→100%），不算充电
 
@@ -228,22 +229,40 @@ class BatteryTray:
         self._last_notify = 0.0
         self._hid_paths = None      # 上次探测到的 HID 接口集合，用来感知插拔
         self._scan_requested = False  # 轻量探测发现新接口 → 请求立刻整轮扫描
+        self._hid_removed = False     # 接口是「变少」触发的扫描 → 允许 HID 通道判离线
         self._hev = None             # 唤起事件句柄
 
     # -- 采样 ---------------------------------------------------------
-    def scan(self):
+    # 通道离线策略：
+    #   · bluetooth —— 每轮都判。探测拿的是全量快照，链路断开/属性消失都是硬证据。
+    #   · logitech / aula —— 平时**不判离线**。它们的读数是往接收器发 HID++ / 私有报文，
+    #     设备休眠时应答不上来（鼠标不动几分钟就睡），这时读不到 ≠ 设备没了；
+    #     真拔了接收器，HID 接口集合会少一条，probe 会发现并触发 trust_hid=True 的扫描，
+    #     那种情况下「读不到」才是真的不在了。
+    ALWAYS_OFFLINE_CHANNELS = ('bluetooth',)
+
+    def scan(self, trust_hid=False):
         with self.lock:
             if self.scanning:
                 return
             self.scanning = True
         try:
-            items = hw_readers.scan_all()
+            items, ok_channels = hw_readers.scan_all()
+            now = time.time()
             with self.lock:
-                state_store.update_with_scan(self.state, items, time.time())
+                state_store.update_levels(self.state, items, now)
+                # 只对「这次真读成功」的通道判离线：某个读取器报错时它的设备原样保留，
+                # 否则一次异常会把整套设备从面板上抹掉。
+                for ch in ok_channels:
+                    if ch not in self.ALWAYS_OFFLINE_CHANNELS and not trust_hid:
+                        continue
+                    live = [i['key'] for i in items if i.get('channel') == ch]
+                    state_store.mark_offline(self.state, live, ch, now)
                 state_store.save_state(self.state)
-                self.last_scan_ts = time.time()
+                self.last_scan_ts = now
                 self.scan_error = None
-            log.info('采样完成：%d 个设备', len(items))
+            log.info('采样完成：%d 个设备（通道 %s%s）', len(items),
+                     '/'.join(sorted(ok_channels)), '，含 HID 拔插' if trust_hid else '')
         except Exception as e:
             log.exception('采样失败')
             with self.lock:
@@ -254,18 +273,18 @@ class BatteryTray:
             self.refresh_display(force=True)
 
     def probe(self):
-        """轻量探测（20 秒一次）：蓝牙快照 + HID 接口集合，负责「实时增删」。
+        """轻量探测（3 秒一次）：蓝牙快照 + HID 接口集合。
+
+        **两条结果分开返回** `(levels_changed, roster_changed)`：
+          · roster_changed —— 设备增删（新接入 / 掉线 / 重新连上），面板要重建列表
+          · levels_changed —— 只有电量数字变了，面板只需要改数字，别重建窗口
 
         和整轮扫描的区别：
-          · 蓝牙只读系统缓存属性，不往设备发请求，20 秒一次也不打扰设备休眠
+          · 蓝牙只读系统缓存属性 + 经典链路状态，不往设备发请求，3 秒一次不打扰休眠
           · HID 只枚举接口路径（微秒级），不读数、不跟罗技握手
-        作用：
-          · 新连接的设备立刻入库并刷新面板（不用等下一轮整轮扫描）
-          · 蓝牙设备从快照里消失（关机 / 出配对）→ 标记离线，面板随即收起
-          · HID 接口集合一有变化（插拔接收器）→ 触发整轮扫描
-        返回是否有变化（有变化就该强制重画面板）。
         """
-        changed = False
+        levels = False
+        roster = False
 
         # ---- 蓝牙：全量快照，没出现在里的就算离线（只影响 bluetooth 通道）----
         try:
@@ -274,17 +293,31 @@ class BatteryTray:
             log.debug('蓝牙探测失败', exc_info=True)
             items = None
         if items is not None:
+            now = time.time()
             with self.lock:
-                touched = state_store.apply_snapshot(
-                    self.state, items, channel='bluetooth', now=time.time())
-                if touched:
+                res = state_store.update_levels(self.state, items, now)
+                off = state_store.mark_offline(
+                    self.state, [i['key'] for i in items], 'bluetooth', now)
+                done = set(off) | set(res['offline'])
+                if res['new'] or res['revived'] or done:
+                    roster = True
+                if res['level'] or res['revived']:
+                    levels = True
+                if roster or levels:
                     state_store.save_state(self.state)
-                    changed = True
-                    for key in touched:
-                        dev = (self.state.get('devices') or {}).get(key) or {}
-                        log.info('蓝牙更新：%s %s%% 在线=%s',
-                                 dev.get('name', key), dev.get('last_level'),
-                                 dev.get('online'))
+                devices = self.state.get('devices') or {}
+                for key in res['new']:
+                    dev = devices.get(key) or {}
+                    log.info('设备接入：%s %s%%', dev.get('name'), dev.get('last_level'))
+                for key in res['revived']:
+                    dev = devices.get(key) or {}
+                    log.info('设备重新连上：%s %s%%', dev.get('name'), dev.get('last_level'))
+                for key in done:
+                    dev = devices.get(key) or {}
+                    log.info('设备离线：%s', dev.get('name', key))
+                for key in res['level']:
+                    dev = devices.get(key) or {}
+                    log.debug('电量变化：%s %s%%', dev.get('name'), dev.get('last_level'))
 
         # ---- HID：接口集合变了就说明插拔过接收器，立刻做一次整轮扫描 ----
         try:
@@ -301,8 +334,10 @@ class BatteryTray:
                 if added or removed:
                     log.info('HID 接口变化：+%d -%d，触发整轮采样', added, removed)
                     self._scan_requested = True
-                    changed = True
-        return changed
+                    # 接口变少才可能是拔了接收器；这时「读不到」才算真的不在了
+                    self._hid_removed = self._hid_removed or removed > 0
+                    roster = True
+        return levels, roster
 
     # -- 展示 ---------------------------------------------------------
     def device_rows(self):
@@ -373,15 +408,15 @@ class BatteryTray:
         else:
             shown = None
         key = (shown, self.tooltip(rows))
-        if not force and key == self._last_icon_key:
-            return
-        self._last_icon_key = key
-        try:
-            self.icon.icon = icons.render_icon(shown)
-            self.icon.title = self.tooltip(rows)
-            self.icon.update_menu()
-        except Exception:
-            log.debug('刷新托盘失败', exc_info=True)
+        if force or key != self._last_icon_key:
+            self._last_icon_key = key
+            try:
+                self.icon.icon = icons.render_icon(shown)
+                self.icon.title = self.tooltip(rows)
+                self.icon.update_menu()
+            except Exception:
+                log.debug('刷新托盘失败', exc_info=True)
+        # 面板自己分流：设备增删才重建窗口，纯电量变化只重绘内容（不闪）。
         try:
             self.panel.refresh_if_visible(rows, self.updated_text())
         except Exception:
@@ -599,15 +634,17 @@ class BatteryTray:
         self.scan()
         self.check_low_battery(self.device_rows())
         while not self.stop_event.wait(PROBE_SECONDS):
-            # 每 20 秒一次轻量探测：新设备入库、离线出库都靠它，所以别指望更长周期
-            force = self.probe()
+            # 每 3 秒一次轻量探测：新设备入库、离线出库都靠它，别指望更长周期
+            levels, roster = self.probe()
             interval = max(5, int(self.cfg.get('interval_minutes', 60))) * 60
             due = (self.last_scan_ts is None) or (time.time() - self.last_scan_ts >= interval)
             if due or self._scan_requested:
+                trust = self._hid_removed
                 self._scan_requested = False
-                self.scan()
+                self._hid_removed = False
+                self.scan(trust_hid=trust)
             else:
-                self.refresh_display(force=force)
+                self.refresh_display(force=(levels or roster))
             self.check_low_battery(self.device_rows())
 
     def _tray_anchor(self):
@@ -694,7 +731,8 @@ def main():
     args, _ = parser.parse_known_args()
 
     if args.once:
-        lines = [f"[{d['level']:3d}%] {d['name']}  ({d['channel']})" for d in hw_readers.scan_all()]
+        devs, _chans = hw_readers.scan_all()
+        lines = [f"[{d['level']:3d}%] {d['name']}  ({d['channel']})" for d in devs]
         try:
             print('\n'.join(lines))
         except Exception:
