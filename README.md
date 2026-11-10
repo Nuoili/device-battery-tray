@@ -1,6 +1,8 @@
-# 设备电量 · DeviceBatteryTray
+# Device Battery
 
 **常驻系统托盘，一眼看到外接无线设备还剩多少电。**
+
+软件名就叫 **Device Battery**（中间有空格）：exe 文件名、任务管理器显示名、桌面与开始菜单的快捷方式名、托盘提示，全部统一用这个名字。
 
 ![面板预览](docs/preview.png)
 
@@ -25,7 +27,7 @@ Windows 自带的任务栏电池只显示「本机」电量。蓝牙键鼠、耳
 
 ## 安装与使用
 
-1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `DeviceBatteryTray-v1.0.4.exe`（就是「设备电量.exe」，仅改了文件名），双击启动。同一页还有 `DeviceBatteryTray-Uninstaller-v1.0.4.bat`，留着以后卸载用
+1. 从 [**Releases**](https://github.com/Nuoili/device-battery-tray/releases/latest) 下载 `Device Battery-v1.0.5.exe`，放到任意文件夹（建议 `D:\Device Battery\`），双击启动。同一页还有 `Device Battery-Uninstaller-v1.0.5.bat`，留着以后卸载用
 2. 图标默认在托盘 `^` 溢出区 —— 点开 `^`，按住图标拖到常显区松手即可固定
 3. **左键单击** = 弹面板（再点一次收起，点面板外面也会收）；**右键** = 设置菜单
 
@@ -72,14 +74,16 @@ battery_tray.py --once     只读一次并打印，不驻留（排查用）
 
 ```bat
 pip install pyinstaller pystray pillow hidapi
-python 源码/gen_icon.py 源码/icon.ico
+python 源码/gen_icon.py "源码/Device Battery.ico"
 
-python -m PyInstaller --onefile --noconsole --name BatteryTray ^
-  --icon "<源码目录绝对路径>\icon.ico" ^
+python -m PyInstaller --onefile --noconsole --name "Device Battery" ^
+  --icon "<源码目录绝对路径>\Device Battery.ico" ^
   --manifest "<源码目录绝对路径>\app.manifest" ^
   --collect-all hid --distpath .\dist --workpath .\build --specpath .\build ^
   源码/battery_tray.py
 ```
+
+`--name` 直接用产品名（含空格），打出来就是 `Device Battery.exe`，程序内标题、任务管理器显示名、快捷方式默认名天然一致。
 
 `--icon` / `--manifest` **必须写绝对路径**：PyInstaller 会按 `--specpath` 的相对路径去解析，写相对路径时打包会「成功」，但 dist 里生成一个几十 KB 的残缺 exe。
 
@@ -119,7 +123,7 @@ BACKDROP_RADIUS  = 13.0   # 圆角半径
 
 ## 数据与卸载
 
-配置和历史上报都在 `%APPDATA%\DeviceBatteryTray\`：
+配置和历史上报都在 `%APPDATA%\Device Battery\`：
 
 ```text
 config.json   设置（检测间隔、自启状态）
@@ -127,11 +131,13 @@ state.json    各设备电量历史（用于算掉电速率）
 app.log       运行日志，出问题看这个
 ```
 
-彻底卸载：双击仓库根目录的 **`卸载器.bat`**，它会结束进程、移除开机自启（HKCU Run 键 `DeviceBatteryTray`）、把程序目录整个送进回收站，并单独问一句用户数据留不留。
+> 从 v1.0.4 及以前升级上来时，数据原本在 `%APPDATA%\DeviceBatteryTray\`。首次启动会自动把整个目录改名带过来（`state_store.migrate_legacy_dir`），配置和历史不丢。
 
-手动卸载：右键托盘 → 退出 → 删 exe → 删 `%APPDATA%\DeviceBatteryTray` 文件夹。开过自启的记得先在菜单里取消。
+彻底卸载：双击程序目录里的 **`Device Battery 卸载器.bat`**，它会结束进程、移除开机自启（HKCU Run 键 `Device Battery`，顺带清掉旧键名 `DeviceBatteryTray`）、删掉桌面与开始菜单的快捷方式、把程序目录整个送进回收站，并单独问一句用户数据留不留。
 
-> 卸载器会先把「自己所在的文件夹」判定一遍（找 `设备电量*.exe` 或 `源码\battery_tray.py`），认不出就拒绝执行 —— 防止把它误拷到别的目录后双击，把那个目录整个删掉。
+手动卸载：右键托盘 → 退出 → 删 exe → 删 `%APPDATA%\Device Battery` 文件夹。开过自启的记得先在菜单里取消。
+
+> 卸载器会先把「自己所在的文件夹」判定一遍（找 `Device Battery*.exe` / `BatteryTray*.exe` / `设备电量*.exe` 或 `源码\battery_tray.py`），认不出就拒绝执行 —— 防止把它误拷到别的目录后双击，把那个目录整个删掉。
 
 ## 资源占用
 

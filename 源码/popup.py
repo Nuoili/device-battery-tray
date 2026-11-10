@@ -284,7 +284,7 @@ def render_panel(rows, scale=1.0, width_dip=340, updated_text='', footer='',
                             outline=BORDER, width=max(1, int(round(1.0 * s))))
 
     f_head = icons.cn_font(int(round(11.5 * s)), bold=False)
-    tl.text((pad, head_h * 0.5), '外接设备电量', font=f_head, fill=SOFT_GRAY,
+    tl.text((pad, head_h * 0.5), 'Device Battery', font=f_head, fill=SOFT_GRAY,
             anchor='lm')
     if updated_text:
         tl.text((W - pad, head_h * 0.5), updated_text, font=f_head,
@@ -311,6 +311,13 @@ def render_panel(rows, scale=1.0, width_dip=340, updated_text='', footer='',
     name_x = pad + 12 * s
     max_name_w = bat_right - bat_w - 13 * s - name_x
 
+    # 设备名与链路标签各占一列：标签从固定 x 起画，逐行竖向对齐成一条竖线。
+    # 名字列宽 = 名字可用宽度 - 标签列宽(取最长标签) - 间距，长名字在这截断。
+    tag_col_w = max((d.textlength(t, font=f_tag)
+                     for t in CHANNEL_LABEL.values()), default=0)
+    name_col_w = max(24 * s, max_name_w - tag_col_w - tag_gap)
+    tag_x = name_x + name_col_w + tag_gap
+
     for i, r in enumerate(rows[:7]):
         cy = head_h + i * row_h + row_h / 2.0
         lv = r.get('level')
@@ -332,11 +339,12 @@ def render_panel(rows, scale=1.0, width_dip=340, updated_text='', footer='',
             pct_text = '—' if lv is None else ('≈' if r.get('estimated') else '') + f'{int(round(lv))}%'
             # 双模设备（2.4G + 蓝牙）只显示当前在用的那条链路，标签写清是哪条
             ctag = CHANNEL_LABEL.get(r.get('channel') or '', '')
-            tag_w = (d.textlength(ctag, font=f_tag) + tag_gap) if ctag else 0
-            shown, nw = _fit(d, name, f_name, max_name_w - tag_w)
+            # 名字按固定列宽截断，标签画在固定的 tag_x —— 所以每行的链路标签
+            # 都能对齐成一列，不会因为名字长短而左右乱跑。
+            shown, _ = _fit(d, name, f_name, name_col_w)
             tl.text((name_x, cy), shown, font=f_name, fill=SOFT_GRAY, anchor='lm')
             if ctag:
-                tl.text((name_x + nw + tag_gap, cy), ctag, font=f_tag,
+                tl.text((tag_x, cy), ctag, font=f_tag,
                         fill=TAG_GRAY, anchor='lm', grow=0)
 
             bx = bat_right - bat_w
@@ -632,7 +640,7 @@ class DevicePanel:
         ex_style = (WS_EX_LAYERED | WS_EX_TOOLWINDOW
                     | WS_EX_TOPMOST | WS_EX_NOACTIVATE)
         self._hwnd = user32.CreateWindowExW(
-            ex_style, self.CLASS_NAME, '设备电量', WS_POPUP,
+            ex_style, self.CLASS_NAME, 'Device Battery', WS_POPUP,
             0, 0, 0, 0, None, None, hinst, None)
         if not self._hwnd:
             return

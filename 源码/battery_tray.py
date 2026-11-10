@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-设备电量托盘 —— 常驻系统托盘，显示外接无线设备的电量。
+Device Battery —— 常驻系统托盘，显示外接无线设备的电量。
 
 工作方式：
-  · 启动即采样一次，之后每 60 分钟读一次真实电量
+  · 启动即采样一次，之后按「检测间隔」读真实电量（默认 60 分钟）
+  · 3 秒一次轻量探测：新接入 / 掉线的设备实时反映到面板
   · 两次采样之间，用历史掉电速率线性外推，图标上的数字是估算值
   · 只保留一个托盘图标 + 一个定时线程，无窗口、无后台轮询
 
 命令行：
-  设备电量.exe            正常启动（有窗口即托盘）
-  设备电量.exe --tray     静默启动（供开机自启使用）
-  设备电量.exe --once     只读一次并打印，不驻留（排查用）
+  Device Battery.exe            正常启动（有窗口即托盘）
+  Device Battery.exe --tray     静默启动（供开机自启使用）
+  Device Battery.exe --once     只读一次并打印，不驻留（排查用）
 """
 import argparse
 import ctypes
@@ -30,9 +31,11 @@ import icons
 import popup
 import state_store
 
-APP_TITLE = '设备电量'
-APP_VERSION = '1.0.4'
-APP_REG_NAME = 'DeviceBatteryTray'
+APP_TITLE = 'Device Battery'          # 软件名（托盘提示、菜单、窗口标题、文件名都跟它走）
+APP_VERSION = '1.0.5'
+# 开机自启的注册表值名。v1.0.5 起统一成产品名，旧版留下的值会在启动时自动迁过来。
+APP_REG_NAME = 'Device Battery'
+LEGACY_REG_NAMES = ('DeviceBatteryTray',)
 MUTEX_NAME = 'DeviceBatteryTray_SingleInstance'
 # 第二次双击时用来叫醒已经在跑的那个实例：它 wait 这个命名事件，收到就把面板弹出来
 ACTIVATE_EVENT = 'DeviceBatteryTray_ShowPanel'
@@ -97,13 +100,55 @@ def autostart_command():
     return f'"{sys.executable}" "{script}" --tray'
 
 
+def _read_run_values():
+    """读取 HKCU Run 下与本程序相关的值：{值名: 命令行}。"""
+    import winreg
+    hive, path = _run_key()
+    out = {}
+    try:
+        with winreg.OpenKey(hive, path, 0, winreg.KEY_READ) as k:
+            for name in (APP_REG_NAME,) + LEGACY_REG_NAMES:
+                try:
+                    val, _ = winreg.QueryValueEx(k, name)
+                except FileNotFoundError:
+                    continue
+                out[name] = val
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def migrate_autostart():
+    """把旧版本遗留的自启值改到新名字下。
+
+    v1.0.5 把注册表值名从 `DeviceBatteryTray` 换成了 `Device Battery`。
+    不迁移的话，升级后自启会失效（新名字下没值），任务管理器里还留一条
+    指向旧 exe 的死项。
+    """
+    import winreg
+    found = _read_run_values()
+    legacy = [n for n in LEGACY_REG_NAMES if n in found]
+    if not legacy or APP_REG_NAME in found:
+        return False
+    hive, path = _run_key()
+    try:
+        with winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, APP_REG_NAME, 0, winreg.REG_SZ, autostart_command())
+            for name in legacy:
+                try:
+                    winreg.DeleteValue(k, name)
+                except FileNotFoundError:
+                    pass
+        log.info('自启项已迁移：%s -> %s', '/'.join(legacy), APP_REG_NAME)
+        return True
+    except Exception as e:
+        log.warning('迁移自启项失败: %s', e)
+        return False
+
+
 def is_autostart_enabled():
     try:
-        import winreg
-        hive, path = _run_key()
-        with winreg.OpenKey(hive, path, 0, winreg.KEY_READ) as k:
-            val, _ = winreg.QueryValueEx(k, APP_REG_NAME)
-            return bool(val)
+        return bool(_read_run_values())
     except Exception:
         return False
 
@@ -115,7 +160,12 @@ def set_autostart(enabled):
         with winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE) as k:
             if enabled:
                 winreg.SetValueEx(k, APP_REG_NAME, 0, winreg.REG_SZ, autostart_command())
-            else:
+            for name in LEGACY_REG_NAMES:
+                try:
+                    winreg.DeleteValue(k, name)
+                except FileNotFoundError:
+                    pass
+            if not enabled:
                 try:
                     winreg.DeleteValue(k, APP_REG_NAME)
                 except FileNotFoundError:
@@ -124,6 +174,51 @@ def set_autostart(enabled):
     except Exception as e:
         log.warning('设置开机自启失败: %s', e)
         return False
+
+
+# ----------------------------------------------------------------- 快捷方式
+def _shortcut_target():
+    """快捷方式指向什么：打包后就是 exe 自己，源码运行时指 pythonw + 脚本。"""
+    if getattr(sys, 'frozen', False):
+        exe = sys.executable
+        return exe, '', os.path.dirname(exe)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'battery_tray.py')
+    py = sys.executable
+    pyw = os.path.join(os.path.dirname(py), 'pythonw.exe')
+    if os.path.exists(pyw):
+        py = pyw
+    return py, f'"{script}" --tray', os.path.dirname(script)
+
+
+def shortcut_paths():
+    """桌面 + 开始菜单两张「Device Battery.lnk」的完整路径。"""
+    name = APP_TITLE + '.lnk'
+    home = os.environ.get('USERPROFILE') or os.path.expanduser('~')
+    appdata = os.environ.get('APPDATA') or ''
+    return [
+        os.path.join(home, 'Desktop', name),
+        os.path.join(appdata, 'Microsoft', 'Windows', 'Start Menu',
+                     'Programs', name),
+    ]
+
+
+def create_shortcuts():
+    """在桌面和开始菜单建快捷方式，名字统一叫 Device Battery。返回 (成功, 失败)。"""
+    import shortcut
+    target, args, workdir = _shortcut_target()
+    made, failed = [], []
+    for lnk in shortcut_paths():
+        try:
+            if shortcut.create_shortcut(lnk, target, workdir=workdir, args=args,
+                                        icon=target, description=APP_TITLE):
+                made.append(lnk)
+            else:
+                failed.append(lnk)
+        except Exception:
+            log.debug('创建快捷方式失败: %s', lnk, exc_info=True)
+            failed.append(lnk)
+    return made, failed
 
 
 def _clean_hist(dev):
@@ -636,6 +731,8 @@ class BatteryTray:
         items.append(Item(f'检测间隔 {interval} 分钟', self.on_change_interval))
         items.append(Item('开机自启', self.on_toggle_autostart,
                           checked=lambda item: is_autostart_enabled()))
+        items.append(Item('创建快捷方式（桌面 + 开始菜单）',
+                          self.on_create_shortcuts))
         items.append(Menu.SEPARATOR)
         items.append(Item(f'版本 v{APP_VERSION}', self._noop))
         items.append(Item('退出', self.on_quit))
@@ -661,6 +758,20 @@ class BatteryTray:
     def on_toggle_autostart(self, icon=None, item=None):
         set_autostart(not is_autostart_enabled())
         self.refresh_display(force=True)
+
+    def on_create_shortcuts(self, icon=None, item=None):
+        made, failed = create_shortcuts()
+        try:
+            if made and not failed:
+                icon.notify('已在桌面和开始菜单创建「%s」快捷方式' % APP_TITLE,
+                            APP_TITLE)
+            elif made:
+                icon.notify('部分快捷方式创建失败，请检查权限', APP_TITLE)
+            else:
+                icon.notify('快捷方式创建失败，请检查权限', APP_TITLE)
+        except Exception:
+            log.debug('快捷方式提示失败', exc_info=True)
+        log.info('创建快捷方式：成功 %d 个，失败 %d 个', len(made), len(failed))
 
     def on_quit(self, icon=None, item=None):
         self.stop_event.set()
@@ -793,16 +904,22 @@ def main():
                 try:
                     ctypes.windll.user32.MessageBoxW(
                         None,
-                        '设备电量已经在运行了，但没能把它的面板叫出来。\n\n'
+                        'Device Battery 已经在运行了，但没能把它的面板叫出来。\n\n'
                         '图标在系统右下角托盘里，如果没有直接看到，'
                         '请点开托盘的「^」展开区域。',
-                        '设备电量', 0x40)
+                        APP_TITLE, 0x40)
                 except Exception:
                     pass
         return
 
+    # 先迁数据目录，再开日志：setup_logging 会先把新目录建出来，
+    # 一旦新目录存在，migrate_legacy_dir 就认为「已经迁过了」而跳过。
+    migrated = state_store.migrate_legacy_dir()
     setup_logging()
     log.info('启动，argv=%s', sys.argv)
+    if migrated:
+        log.info('数据目录已迁移到 %s', state_store.DATA_DIR)
+    migrate_autostart()
     cfg = state_store.load_config()
     state = state_store.load_state()
     try:

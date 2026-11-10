@@ -9,11 +9,15 @@
 """
 import json
 import os
+import shutil
 import statistics
 import time
 from pathlib import Path
 
-APP_NAME = 'DeviceBatteryTray'
+# 数据目录名跟产品名走：v1.0.5 起是 `%APPDATA%\Device Battery\`。
+# 旧版叫 DeviceBatteryTray，启动时会整个挪过来（见 migrate_legacy_dir）。
+APP_NAME = 'Device Battery'
+LEGACY_APP_NAMES = ('DeviceBatteryTray',)
 DATA_DIR = Path(os.environ.get('APPDATA', '.')) / APP_NAME
 STATE_FILE = DATA_DIR / 'state.json'
 CONFIG_FILE = DATA_DIR / 'config.json'
@@ -41,6 +45,37 @@ DEFAULT_CONFIG = {
 
 def ensure_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_dir():
+    """把旧数据目录（`%APPDATA%\\DeviceBatteryTray`）挪到新名字下。
+
+    改名不改数据：配置、电量历史、日志全都带过来，用户升级后不用重新学习掉电速率。
+    新目录已存在就直接用新的，不覆盖。返回是否真的迁移了。
+    """
+    base = DATA_DIR.parent
+    try:
+        if DATA_DIR.exists():
+            return False
+    except OSError:
+        return False
+    for name in LEGACY_APP_NAMES:
+        old = base / name
+        try:
+            if not old.is_dir():
+                continue
+        except OSError:
+            continue
+        try:
+            old.rename(DATA_DIR)          # 同卷直接改名，最快且保留时间戳
+            return True
+        except OSError:
+            try:                          # 被占用 / 跨卷时退回复制
+                shutil.copytree(old, DATA_DIR)
+                return True
+            except Exception:
+                return False
+    return False
 
 
 def load_json(path, default):
